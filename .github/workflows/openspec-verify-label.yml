@@ -1,0 +1,69 @@
+name: Openspec verify label (lab reproduction)
+
+# Reduction of elastic/terraform-provider-elasticstack
+# .github/workflows/openspec-verify-label.lock.yml
+#
+# Faithful: the pull_request_target + labeled trigger, the pull-requests: write
+# review job, and BOTH trust decisions, which call Elastic's own vendored
+# classify-pr.js and select-change.js with the inputs each accepts.
+#
+# Substituted: the gh-aw agent that decides whether verification PASSED is
+# replaced by a deterministic approve. That agent is a quality gate, not a
+# security control, and the claim under test is that APPROVE *eligibility*
+# never considers whether the pull request came from a fork.
+#
+# Under pull_request_target the checkout takes the base branch, so nothing in
+# this workflow or those scripts can be modified by the fork.
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify and review
+    if: github.event.label.name == 'verify-openspec'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+
+      - name: Run Elastic's two trust decisions
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILES_JSON: files.json
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          BASE_REPO_ID: ${{ github.event.repository.id }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate > files.json
+          node .github/scripts/decide.js
+
+      - name: Submit the review the disposition permits
+        if: steps.decide.outputs.review_disposition == 'approval-eligible'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            -f event=APPROVE \
+            -f body='Lab reproduction. select-change.js returned approval-eligible for this pull request.' \
+            --jq '"submitted review id=\(.id) state=\(.state) by=\(.user.login)"'
+
+      - name: Report what the required review now shows
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "approving reviews on this pull request:"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            --jq '.[] | select(.state=="APPROVED") | "  \(.user.login)  \(.state)"'
